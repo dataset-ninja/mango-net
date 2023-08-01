@@ -1,12 +1,15 @@
-import supervisely as sly
 import os
-from dataset_tools.convert import unpack_if_archive
-import src.settings as s
-from urllib.parse import unquote, urlparse
-from supervisely.io.fs import get_file_name, get_file_size
 import shutil
+from urllib.parse import unquote, urlparse
 
+import supervisely as sly
+from cv2 import connectedComponents
+from dataset_tools.convert import unpack_if_archive
+from supervisely.io.fs import get_file_name, get_file_size
 from tqdm import tqdm
+
+import src.settings as s
+
 
 def download_dataset(teamfiles_dir: str) -> str:
     """Use it for large datasets to convert them on the instance"""
@@ -53,20 +56,68 @@ def download_dataset(teamfiles_dir: str) -> str:
         dataset_path = storage_dir
     return dataset_path
 
+
 def convert_and_upload_supervisely_project(
     api: sly.Api, workspace_id: int, project_name: str
 ) -> sly.ProjectInfo:
     ### Function should read local dataset and upload it to Supervisely project, then return project info.###
-    raise NotImplementedError("The converter should be implemented manually.")
+    dataset_path = "/home/alex/DATASETS/TODO/MangoNet-Semantic-Dataset/MangoNet Dataset"
+    ds_name = "ds"
+    batch_size = 3
+    images_folder_name = "original images"
+    masks_folder_name = "annotated images"
+    masks_ext = ".jpg"
+    masks_prefix = "Class_"
 
-    # dataset_path = "/local/path/to/your/dataset" # general way
-    # dataset_path = download_dataset(teamfiles_dir) # for large datasets stored on instance
+    def create_ann(image_path):
+        labels = []
 
-    # ... some code here ...
+        image_name = get_file_name(image_path)[5:]
+        mask_name = masks_prefix + image_name + masks_ext
+        mask_path = os.path.join(masks_pathes, mask_name)
+        ann_np = sly.imaging.image.read(mask_path)[:, :, 0]
+        img_height = ann_np.shape[0]
+        img_wight = ann_np.shape[1]
+        mask = ann_np != 0
+        ret, curr_mask = connectedComponents(mask.astype("uint8"), connectivity=8)
+        for i in range(1, ret):
+            obj_mask = curr_mask == i
+            curr_bitmap = sly.Bitmap(obj_mask)
+            if curr_bitmap.area > 100:
+                curr_label = sly.Label(curr_bitmap, obj_class)
+                labels.append(curr_label)
 
-    # sly.logger.info('Deleting temporary app storage files...')
-    # shutil.rmtree(storage_dir)
+        return sly.Annotation(img_size=(img_height, img_wight), labels=labels)
 
-    # return project
+    obj_class = sly.ObjClass("mango", sly.Bitmap)
 
+    project = api.project.create(workspace_id, project_name, change_name_if_conflict=True)
+    meta = sly.ProjectMeta(obj_classes=[obj_class])
+    api.project.update_meta(project.id, meta.to_json())
 
+    for ds_name in os.listdir(dataset_path):
+        dataset = api.dataset.create(project.id, ds_name, change_name_if_conflict=True)
+
+        curr_ds_path = os.path.join(dataset_path, ds_name)
+
+        images_pathes = os.path.join(curr_ds_path, images_folder_name)
+        masks_pathes = os.path.join(curr_ds_path, masks_folder_name)
+        images_names = os.listdir(images_pathes)
+
+        progress = sly.Progress("Create dataset {}".format(ds_name), len(images_names))
+
+        for img_names_batch in sly.batched(images_names, batch_size=batch_size):
+            images_pathes_batch = [
+                os.path.join(images_pathes, image_path) for image_path in img_names_batch
+            ]
+
+            anns_batch = [create_ann(image_path) for image_path in images_pathes_batch]
+
+            img_infos = api.image.upload_paths(dataset.id, img_names_batch, images_pathes_batch)
+            img_ids = [im_info.id for im_info in img_infos]
+
+            api.annotation.upload_anns(img_ids, anns_batch)
+
+            progress.iters_done_report(len(img_names_batch))
+
+    return project

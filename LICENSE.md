@@ -1,0 +1,1 @@
+The MangoNet Semantic Dataset is under [MIT License](https://spdx.org/licenses/MIT.html) license.
